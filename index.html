@@ -424,7 +424,9 @@ h1{font-weight:700;letter-spacing:-.02em;border-left:5px solid #7C3AED;color:var
 .memo-progress{height:8px;background:rgba(255,255,255,.18);border-radius:8px;overflow:hidden;margin-bottom:16px}
 .memo-progress-fill{height:100%;width:0;background:linear-gradient(90deg,#FBBF24,#F59E0B);border-radius:8px;transition:width .25s}
 .memo-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:22px;box-shadow:var(--shadow);min-height:60px;display:flex;align-items:center}
+.memo-text-wrap{width:100%}
 .memo-text{font-size:1.15rem;font-weight:600;color:var(--ink);line-height:1.55}
+.memo-ru{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);font-size:.92rem;font-style:italic;color:var(--muted);line-height:1.5}
 .memo-reps{display:flex;gap:8px;justify-content:center;margin:14px 0}
 .memo-dot{width:14px;height:14px;border-radius:50%;background:rgba(255,255,255,.2);border:2px solid rgba(251,191,36,.5);transition:.15s}
 .memo-dot.filled{background:#FBBF24;border-color:#FBBF24;transform:scale(1.15)}
@@ -2431,7 +2433,14 @@ function playRealAudioSegment(chunkText,topicId){
  const range=findTokenRange(chunkText,allTokens);
  if(!range)return false;
  const [si,ei]=range;
- const startTime=data.timings[si].start, endTime=data.timings[ei].end;
+ // Forced-alignment word boundaries carry ~30-80ms of jitter — playing exactly at the marked
+ // start/end sometimes clips the very start or tail of a word. Add a small pre-/post-roll,
+ // clamped so it never eats into the neighbouring word's own speech.
+ const START_PAD=0.09, END_PAD=0.11;
+ const prevEnd=si>0?data.timings[si-1].end:0;
+ const nextStart=ei<data.timings.length-1?data.timings[ei+1].start:data.timings[ei].end+END_PAD;
+ const startTime=Math.max(prevEnd,data.timings[si].start-START_PAD);
+ const endTime=Math.min(nextStart,data.timings[ei].end+END_PAD);
  let audio=window.__memoAudioEls[topicId];
  if(!audio){ audio=new Audio('data:audio/mpeg;base64,'+data.audioB64); window.__memoAudioEls[topicId]=audio; }
  window.__memoAudioEl=audio; // last-used, for backward-compat inspection/testing
@@ -2444,16 +2453,29 @@ function playRealAudioSegment(chunkText,topicId){
  audio.play().catch(()=>{});
  return true;
 }
-function buildMemorizationDrill(rawText,topicNum){
+function buildMemorizationDrill(rawText,topicNum,ruRawText){
  const sentences=rawText.split(/(?<=[.!?])\s+/).map(s=>s.trim()).filter(s=>s.length>2);
  if(sentences.length<2)return null;
+ const ruSentences=(ruRawText||'').split(/(?<=[.!?])\s+/).map(s=>s.trim()).filter(s=>s.length>2);
+ // SK and RU aren't always split into the same number of sentences — map by proportional position
+ // (same technique used for the final translation task), so a translation hint is always available.
+ function ruForRange(startIdx,endIdx){
+   if(!ruSentences.length)return'';
+   const n=sentences.length,m=ruSentences.length;
+   const ruStart=Math.floor(startIdx/n*m);
+   const ruEnd=Math.max(ruStart,Math.ceil((endIdx+1)/n*m)-1);
+   return ruSentences.slice(ruStart,Math.min(ruEnd+1,m)).join(' ');
+ }
  const thirdSize=Math.max(1,Math.ceil(sentences.length/3));
  const partChunks=[];
- for(let i=0;i<sentences.length;i+=thirdSize){ partChunks.push(sentences.slice(i,i+thirdSize).join(' ')); }
+ for(let i=0;i<sentences.length;i+=thirdSize){
+   const endIdx=Math.min(i+thirdSize,sentences.length)-1;
+   partChunks.push({sk:sentences.slice(i,i+thirdSize).join(' '),ru:ruForRange(i,endIdx)});
+ }
  const phases=[
-   {label:'Фаза 1 · По предложениям',chunks:sentences},
+   {label:'Фаза 1 · По предложениям',chunks:sentences.map((s,i)=>({sk:s,ru:ruForRange(i,i)}))},
    {label:'Фаза 2 · По частям текста',chunks:partChunks},
-   {label:'Фаза 3 · Весь текст целиком',chunks:[sentences.join(' ')]}
+   {label:'Фаза 3 · Весь текст целиком',chunks:[{sk:sentences.join(' '),ru:ruSentences.join(' ')}]}
  ];
  const REPS_NEEDED=5;
  const totalSteps=phases.reduce((s,p)=>s+p.chunks.length*REPS_NEEDED,0);
@@ -2474,23 +2496,23 @@ function buildMemorizationDrill(rawText,topicNum){
      if(window.trackerAddAction)window.trackerAddAction('текст заучен','заучивание');
      return;
    }
-   const phase=phases[pIdx]; const chunkText=phase.chunks[cIdx];
+   const phase=phases[pIdx]; const chunk=phase.chunks[cIdx];
    phaseLabel.textContent=`${phase.label} — ${cIdx+1} из ${phase.chunks.length}`;
-   card.innerHTML=`<div class="memo-text">${chunkText}</div>`;
+   card.innerHTML=`<div class="memo-text-wrap"><div class="memo-text">${chunk.sk}</div>${chunk.ru?`<div class="memo-ru">${chunk.ru}</div>`:''}</div>`;
    reps.innerHTML=Array.from({length:REPS_NEEDED},(_,i)=>`<span class="memo-dot${i<repCount?' filled':''}"></span>`).join('');
    controls.innerHTML='';
    const hasReal=typeof getRealAudioForTopic==='function' && !!getRealAudioForTopic(topicNum);
    const playBtn=document.createElement('button'); playBtn.type='button'; playBtn.className='btn cream'; playBtn.textContent=hasReal?'🎧 Послушать (запись)':'🔊 Послушать';
    playBtn.onclick=()=>{
-     const usedReal=playRealAudioSegment(chunkText,topicNum);
-     if(!usedReal) speak(chunkText,.85);
+     const usedReal=playRealAudioSegment(chunk.sk,topicNum);
+     if(!usedReal) speak(chunk.sk,.85);
    };
    const repBtn=document.createElement('button'); repBtn.type='button'; repBtn.className='btn primary'; repBtn.textContent=`✓ Повторил(а) вслух (${repCount}/${REPS_NEEDED})`;
    repBtn.onclick=()=>{
      repCount++; doneSteps++;
      progressFill.style.width=Math.round(doneSteps/totalSteps*100)+'%';
      if(repCount>=REPS_NEEDED){
-       if(window.trackerAddAction)window.trackerAddAction(chunkText.slice(0,30),'заучивание · '+phase.label);
+       if(window.trackerAddAction)window.trackerAddAction(chunk.sk.slice(0,30),'заучивание · '+phase.label);
        cIdx++; repCount=0;
        if(cIdx>=phase.chunks.length){ pIdx++; cIdx=0; }
      }
@@ -2869,7 +2891,9 @@ document.querySelectorAll('.exercise').forEach(ex=>{
      ex.appendChild(illWrap);
    }
    const rawTextForMemo=ex.dataset.text||'';
-   const memoDrill=buildMemorizationDrill(rawTextForMemo,topicNum);
+   const ruPForMemo=topic.querySelector('.translation p');
+   const ruRawForMemo=ruPForMemo?ruPForMemo.textContent.replace(/^Preklad:\s*/,'').trim():'';
+   const memoDrill=buildMemorizationDrill(rawTextForMemo,topicNum,ruRawForMemo);
    if(memoDrill)ex.appendChild(memoDrill);
    const title=document.createElement('h4');title.textContent='🧠 Практика после текста';ex.appendChild(title);
    const intro=document.createElement('p');intro.className='speaking-intro';intro.textContent='Последовательность: вспомнить → понять → произнести → использовать в своей ситуации.';ex.appendChild(intro);
